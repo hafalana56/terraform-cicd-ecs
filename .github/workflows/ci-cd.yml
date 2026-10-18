@@ -1,0 +1,60 @@
+name: ci-cd
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r app/requirements.txt pytest
+      - run: pytest -q
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, terraform]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ca-central-1
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: cloud-engineer-cicd
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$REGISTRY/$REPOSITORY:$IMAGE_TAG" app
+          docker push "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform apply
+        working-directory: infra
+        env:
+          IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/cloud-engineer-cicd:${{ github.sha }}
+        run: |
+          terraform init
+          terraform apply -auto-approve -var="container_image=$IMAGE_URI"
